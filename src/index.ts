@@ -3,6 +3,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import express, { type Request, type Response } from 'express';
+import { timingSafeEqual as cryptoTimingSafeEqual } from 'node:crypto';
 import { WhoopClient } from './whoop-client.js';
 import { WhoopDatabase } from './database.js';
 import { WhoopSync } from './sync.js';
@@ -19,7 +20,13 @@ const config = {
 	dbPath: process.env.DB_PATH ?? './whoop.db',
 	port: Number.parseInt(process.env.PORT ?? '3000', 10),
 	mode: process.env.MCP_MODE ?? 'http',
+	authToken: process.env.MCP_AUTH_TOKEN ?? '',
 };
+
+if (config.mode !== 'stdio' && config.authToken.length < 24) {
+	process.stderr.write('Refusing to start: set MCP_AUTH_TOKEN to a random string of at least 24 characters.\n');
+	process.exit(1);
+}
 
 const db = new WhoopDatabase(config.dbPath);
 const client = new WhoopClient({
@@ -364,7 +371,21 @@ async function main(): Promise<void> {
 			res.json({ status: 'ok', authenticated: Boolean(db.getTokens()) });
 		});
 
-		app.all('/mcp', async (req: Request, res: Response) => {
+		// Any /mcp request without the secret path token is rejected. Old bare /mcp path is disabled.
+		app.all('/mcp', (_req: Request, res: Response) => {
+			res.status(404).send('Not found');
+		});
+
+		app.all('/mcp/:token', async (req: Request, res: Response) => {
+			const supplied = String(req.params.token ?? '');
+			const expected = config.authToken;
+			const a = Buffer.from(supplied);
+			const b = Buffer.from(expected);
+			if (a.length !== b.length || !cryptoTimingSafeEqual(a, b)) {
+				res.status(404).send('Not found');
+				return;
+			}
+
 			const sessionId = req.headers['mcp-session-id'] as string | undefined;
 
 			if (req.method === 'DELETE' && sessionId && transports.has(sessionId)) {
